@@ -47,9 +47,17 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      # The repository intentionally does not ship the Gradle wrapper jar /
+      # scripts. We generate them on-the-fly so the build is fully self-
+      # contained inside CI and works on a fresh checkout.
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.5 --distribution-type bin
 
       - name: Build release APK
-        run: ./gradlew :animekai:assembleRelease
+        run: ./gradlew :animekai:assembleRelease --stacktrace --no-daemon
 
       - name: Locate built APK
         id: apk
