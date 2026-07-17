@@ -16,19 +16,44 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 /**
  * Aniyomi / AnymeX extension for animekaitv.to and its mirrors.
  *
+ * Site structure (verified against the live site):
+ *
+ *   - `/home`                 — landing/app page. The "Recently Updated"
+ *                               section is what we use for popular + latest.
+ *   - `/filter?keyword=<q>`   — search results.
+ *   - `/watch/<slug>-<5char>` — anime details page. The numeric anime id
+ *                               lives in `<main class="layout-page-watchtv"
+ *                               data-id="<numeric>">`.
+ *   - `/ajax/episode/list/<numeric-id>`
+ *                             — returns JSON `{status, result: "<HTML>"}`.
+ *                               The HTML contains one `<li><a data-num=...
+ *                               data-ids="<base64>" .../></li>` per episode.
+ *   - `/ajax/server/list?servers=<data-ids>`
+ *                             — returns JSON `{status, result: "<HTML>"}`.
+ *                               The HTML contains sub / hsub / dub blocks,
+ *                               each with `<li data-link-id="<base64>">`.
+ *   - `/ajax/server?get=<data-link-id>`
+ *                             — returns JSON `{status, result: {url,
+ *                               skip_data}}`. `url` is the embed page
+ *                               (typically on vidtube.site or
+ *                               megaplay.buzz). The embed page exposes
+ *                               `<host>/stream/getSourcesNew?id=<data-id>
+ *                               &type=<sub|dub>` which returns the actual
+ *                               m3u8 URL — see AnimeKaiExtractors.
+ *
  * Features:
- *  - Configurable mirror selection (multi-select).
+ *  - Configurable mirror selection (single + multi-select).
  *  - Multi-select preference for which video servers to expose.
  *  - Multi-select preference for which video qualities to expose.
  *  - Subbed + dubbed streams merged into a single episode; dubbed servers
- *    are sorted to appear first in the server list.
- *  - Standard Aniyomi Video objects, so downloads work natively.
+ *    are sorted to appear first in the server list (toggleable).
  */
 class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
 
@@ -68,36 +93,30 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
     )
 
     /**
-     * Video servers that AnimeKai typically embeds. Keys are the internal
-     * server identifiers we look for in the embed markup; values are the
-     * human-readable labels shown in the preference screen.
+     * Server-id prefixes that we recognise in the user-facing multi-select
+     * preference. The site's server list returns labels like "VidPlay-1",
+     * "HD-1", "Vidstream-2", "VidCloud-1" — we match the user's selection
+     * by case-insensitive substring, so "vidplay" matches "VidPlay-1" and
+     * "VidPlay-2", "hd-1" matches "HD-1", etc.
      */
     private val SERVERS: LinkedHashMap<String, String> = linkedMapOf(
-        "vidstreaming"  to "Vidstreaming",
-        "vidstream"     to "VidStream",
-        "gogo"          to "Gogo server",
-        "streamtape"    to "Streamtape",
-        "doodstream"    to "Doodstream",
-        "mixdrop"       to "MixDrop",
-        "mp4upload"     to "MP4Upload",
-        "filemoon"      to "FileMoon",
-        "streamwish"    to "StreamWish",
-        "hd-1"          to "HD-1 (internal)",
-        "hd-2"          to "HD-2 (internal)",
-        "xstream"       to "XStream",
-        "kwik"          to "Kwik"
+        "vidplay"    to "VidPlay",
+        "hd-1"       to "HD-1",
+        "hd-2"       to "HD-2",
+        "vidstream"  to "Vidstream",
+        "vidcloud"   to "VidCloud"
     )
 
     /**
-     * Qualities that may be exposed by the extractors. The user can keep
-     * only the ones they care about; everything else is filtered out
-     * before the video list is returned to Aniyomi.
+     * Qualities that may be exposed by the extractors. The m3u8 master
+     * playlist auto-negotiates quality, so by default we expose everything
+     * and let Aniyomi's player pick.
      */
     private val QUALITIES: LinkedHashMap<String, String> = linkedMapOf(
-        "1080p" to "1080p",
-        "720p"  to "720p",
-        "480p"  to "480p",
-        "360p"  to "360p",
+        "1080p"   to "1080p",
+        "720p"    to "720p",
+        "480p"    to "480p",
+        "360p"    to "360p",
         "default" to "Default / Auto"
     )
 
@@ -110,42 +129,44 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
         .add("Referer", baseUrl)
         .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .add("Accept-Language", "en-US,en;q=0.9")
+        .add("X-Requested-With", "XMLHttpRequest")
 
     // -----------------------------------------------------------------
     // Popular / Latest / Search
+    //
+    // The /home page has a "Recently Updated" section that lists the
+    // latest episodes. We use the same selector for popular + latest
+    // because animekaitv.to does not have a dedicated "popular" page —
+    // /home is the closest analogue. Search uses /filter?keyword=<q>.
     // -----------------------------------------------------------------
 
     override fun popularAnimeRequest(page: Int): Request {
-        val url = "$baseUrl/trending".toHttpUrl().newBuilder()
-            .addQueryParameter("page", page.toString())
-            .build()
-        return GET(url.toString(), headers)
+        return GET("$baseUrl/home", headers)
     }
 
-    override fun popularAnimeSelector() = "div.film_list-wrap > div.flw-item"
+    override fun popularAnimeSelector(): String =
+        "section#recent-update .ani.items > .item"
 
     override fun popularAnimeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
-        element.select("a.film-poster-ahref").firstOrNull()?.let { a ->
-            anime.url = a.absUrl("href").substringAfter(baseUrl).ifEmpty { a.absUrl("href") }
-            a.select("img").firstOrNull()?.let {
-                anime.thumbnail_url = it.absUrl("data-src").ifEmpty { it.absUrl("src") }
-            }
-        }
-        element.select("h3.film-name a").firstOrNull()?.let {
+        // The watch URL is on the poster <a>. Strip the trailing /ep-N
+        // if present (each card links to "the next new episode" by default).
+        val href = element.select("a[href*=/watch/]").firstOrNull()
+            ?.attr("href")?.toWatchUrl().orEmpty()
+        anime.url = href
+        anime.thumbnail_url = element.select("img").firstOrNull()
+            ?.let { it.absUrl("data-src").ifEmpty { it.absUrl("src") } }
+        element.select("a.name.d-title").firstOrNull()?.let {
             anime.title = it.text().trim()
         }
         return anime
     }
 
-    override fun popularAnimeNextPageSelector(): String? =
-        "li.page-item a[title=Next]"
+    override fun popularAnimeNextPageSelector(): String? = null
 
     override fun latestUpdatesRequest(page: Int): Request {
-        val url = "$baseUrl/recently-updated".toHttpUrl().newBuilder()
-            .addQueryParameter("page", page.toString())
-            .build()
-        return GET(url.toString(), headers)
+        // /home's "Recently Updated" section is the latest feed.
+        return GET("$baseUrl/home", headers)
     }
 
     override fun latestUpdatesSelector() = popularAnimeSelector()
@@ -153,16 +174,47 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
     override fun latestUpdatesNextPageSelector() = popularAnimeNextPageSelector()
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        val url = "$baseUrl/search".toHttpUrl().newBuilder()
-            .addQueryParameter("q", query)
+        val url = "$baseUrl/filter".toHttpUrl().newBuilder()
+            .addQueryParameter("keyword", query)
             .addQueryParameter("page", page.toString())
             .build()
         return GET(url.toString(), headers)
     }
 
-    override fun searchAnimeSelector() = popularAnimeSelector()
-    override fun searchAnimeFromElement(element: Element) = popularAnimeFromElement(element)
-    override fun searchAnimeNextPageSelector() = popularAnimeNextPageSelector()
+    override fun searchAnimeSelector(): String =
+        "div#list-items.ani.items > .item .inner"
+
+    override fun searchAnimeFromElement(element: Element): SAnime {
+        val anime = SAnime.create()
+        val href = element.select("a[href*=/watch/]").firstOrNull()
+            ?.attr("href")?.toWatchUrl().orEmpty()
+        anime.url = href
+        anime.thumbnail_url = element.select("img").firstOrNull()
+            ?.let { it.absUrl("data-src").ifEmpty { it.absUrl("src") } }
+        element.select("a.name.d-title").firstOrNull()?.let {
+            anime.title = it.text().trim()
+        }
+        return anime
+    }
+
+    override fun searchAnimeNextPageSelector(): String? = null
+
+    /**
+     * Normalise a possibly-relative /watch/ URL into a root-relative path
+     * (no host) and strip any trailing `/ep-<N>` segment — episodes are
+     * resolved via the AJAX API, not by URL path.
+     */
+    private fun String.toWatchUrl(): String {
+        val full = when {
+            startsWith("http") -> this
+            startsWith("/")    -> baseUrl + this
+            else               -> "$baseUrl/$this"
+        }
+        // Drop "/ep-<digits>" if present.
+        return full.substringAfter(baseUrl)
+            .replace(Regex("/ep-\\d+/?$"), "")
+            .ifEmpty { this }
+    }
 
     // -----------------------------------------------------------------
     // Anime details
@@ -170,48 +222,102 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
 
     override fun animeDetailsParse(document: Document): SAnime {
         val anime = SAnime.create()
-        anime.title = document.select("h2.film-name").text().trim()
-            .ifEmpty { document.select("h1").text().trim() }
-        document.select("div.film-poster img").firstOrNull()?.let {
+        document.select("h1.title.d-title").firstOrNull()?.let {
+            anime.title = it.text().trim()
+        }
+        document.select("#w-info .poster img").firstOrNull()?.let {
             anime.thumbnail_url = it.absUrl("data-src").ifEmpty { it.absUrl("src") }
         }
-        document.select("div.description").firstOrNull()?.let {
+        document.select("#w-info .synopsis .content").firstOrNull()?.let {
             anime.description = it.text().trim()
         }
-        document.select("div.anisc-info-wrap:has(h3:contains(Genres)) a").eachText()
-            .joinToString(", ").ifEmpty { null }?.let { anime.genre = it }
-        document.select("div.anisc-info-wrap:has(h3:contains(Status)) a").text()
-            .trim().lowercase().let {
-                anime.status = when (it) {
-                    "ongoing", "currently airing" -> SAnime.ONGOING
-                    "completed", "finished" -> SAnime.COMPLETED
-                    else -> SAnime.UNKNOWN
-                }
-            }
+        // Genres live in .bmeta inside a div whose label starts with "Genres:".
+        val genres = document.select("#w-info .bmeta .meta div").toList()
+            .firstOrNull { it.ownText().contains("Genres", ignoreCase = true) }
+            ?.select("a")?.eachText()?.joinToString(", ")
+        if (!genres.isNullOrEmpty()) anime.genre = genres
+        // Status lives in a sibling div labelled "Status:".
+        val status = document.select("#w-info .bmeta .meta div").toList()
+            .firstOrNull { it.ownText().contains("Status", ignoreCase = true) }
+            ?.select("a")?.text()?.trim()?.lowercase().orEmpty()
+        anime.status = when {
+            status.contains("finished") || status.contains("completed") -> SAnime.COMPLETED
+            status.contains("airing")   || status.contains("ongoing")   -> SAnime.ONGOING
+            else                                                         -> SAnime.UNKNOWN
+        }
         return anime
     }
 
     // -----------------------------------------------------------------
     // Episodes
+    //
+    // anime.url is "/watch/<slug>-<5char>". The numeric anime id lives
+    // on the watch page in `<main class="layout-page-watchtv"
+    // data-id="<numeric>">. We fetch the watch page once to extract
+    // that id, then call /ajax/episode/list/<id> to get the episode
+    // list HTML.
     // -----------------------------------------------------------------
 
     override fun episodeListRequest(anime: SAnime): Request {
-        val id = anime.url.substringAfterLast("/").substringBefore("-episode")
-        val ajaxUrl = "$baseUrl/ajax/episode/list/$id".toHttpUrl().newBuilder()
-            .build()
-        return GET(ajaxUrl.toString(), headers)
+        // Fetch the watch page so we can extract the numeric anime id.
+        return GET(baseUrl + anime.url, headers)
     }
 
-    override fun episodeListSelector() = "a.ep-item"
+    override fun episodeListSelector(): String =
+        // ParsedAnimeHttpSource parses the document returned by
+        // episodeListRequest with this selector. BUT — we override
+        // episodeListParse below to use the AJAX API instead, so this
+        // selector is only a defensive fallback.
+        "ul.ep-range li a"
 
     override fun episodeFromElement(element: Element): SEpisode {
         val episode = SEpisode.create()
-        episode.url = element.absUrl("href").substringAfter(baseUrl).ifEmpty { element.absUrl("href") }
-        val num = element.select("div.ssli-order").text().trim()
+        val num = element.attr("data-num")
+        episode.url = element.attr("data-ids")
         episode.episode_number = num.toFloatOrNull() ?: 0F
-        episode.name = "Episode $num"
-        episode.date_upload = System.currentTimeMillis()
+        val title = element.select("span.d-title").text().trim()
+        episode.name = if (title.isNotBlank()) "Episode $num: $title" else "Episode $num"
+        element.attr("data-timestamp").toLongOrNull()?.let {
+            episode.date_upload = it * 1000L
+        }
         return episode
+    }
+
+    /**
+     * Override the default episode list parse. The watch page itself does
+     * NOT contain the episode list — it's loaded via an AJAX call to
+     * `/ajax/episode/list/<numeric-anime-id>` that returns HTML inside
+     * JSON. We:
+     *   1. Read the numeric id from `<main data-id="...">` on the watch
+     *      page (the response [document] we received from
+     *      [episodeListRequest]).
+     *   2. Fire the AJAX request.
+     *   3. Parse the embedded HTML for `<li><a data-num data-ids ...>`.
+     */
+    override fun episodeListParse(response: Response): List<SEpisode> {
+        val watchDoc = response.asJsoup()
+        // Numeric anime id lives on `<main class="layout-page-watchtv"
+        // data-id="<numeric>">. Fall back to any [data-id="<digits>"]
+        // element if the main tag is missing (mirrors may restructure).
+        val realId = watchDoc.select("main.layout-page-watchtv").firstOrNull()
+            ?.attr("data-id")
+            ?.takeIf { it.matches(Regex("\\d+")) }
+            ?: watchDoc.select("[data-id]").toList()
+                .firstOrNull { it.attr("data-id").matches(Regex("\\d+")) }
+                ?.attr("data-id")
+                .orEmpty()
+        if (realId.isBlank()) return emptyList()
+
+        val ajaxUrl = "$baseUrl/ajax/episode/list/$realId".toHttpUrl().newBuilder().build()
+        val ajaxResp = client.newCall(GET(ajaxUrl.toString(), headers)).execute()
+        val body = ajaxResp.body!!.string()
+        // Response is JSON: {"status":200,"result":"<HTML>"}. Pull out
+        // result, parse as HTML, select episode anchors. (extractJsonField
+        // already JSON-unescapes the string body, so we hand the result
+        // straight to Jsoup.)
+        val resultStr = extractJsonField(body, "result") ?: return emptyList()
+        val epDoc = Jsoup.parse(resultStr, baseUrl)
+        return epDoc.select("ul.ep-range li a").map { episodeFromElement(it) }
     }
 
     // -----------------------------------------------------------------
@@ -220,94 +326,173 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
 
     private val extractor by lazy { AnimeKaiExtractors(client, headers) }
 
+    /**
+     * The episode URL we stored is the raw `data-ids` base64 blob (the
+     * identifier the AJAX server-list API expects). We construct the
+     * server-list request directly from it.
+     */
     override fun videoListRequest(episode: SEpisode): Request {
-        // Episode URL points to a watch page that embeds server buttons.
-        return GET(baseUrl + episode.url, headers)
+        val ids = episode.url
+        val url = "$baseUrl/ajax/server/list".toHttpUrl().newBuilder()
+            .addQueryParameter("servers", ids)
+            .build()
+        return GET(url.toString(), headers)
     }
 
-    override fun videoListSelector() = "div.servers-list a.play-btn"
+    override fun videoListSelector(): String =
+        "div.servers div.type"
 
-    override fun videoFromElement(element: Element): Video {
-        // Not used; we override [videoListParse] instead so we can merge
-        // sub + dub servers in one call with the dubbed ones first.
-        throw UnsupportedOperationException()
-    }
+    override fun videoFromElement(element: Element): Video =
+        throw UnsupportedOperationException(
+            "videoFromElement is not used — videoListParse is overridden.")
 
+    /**
+     * Parse the server-list JSON response, fetch the embed URL for each
+     * enabled server, and merge sub + dub with dub-first ordering.
+     */
     override fun videoListParse(response: Response): List<Video> {
-        val document = response.asJsoup()
-        // Determine which servers the user wants to keep.
-        val enabledServers = preferences.getStringSet(KEY_ENABLED_SERVERS, SERVERS.keys.toSet())
-            ?: SERVERS.keys.toSet()
-        val enabledQualities = preferences.getStringSet(KEY_ENABLED_QUALITIES, QUALITIES.keys.toSet())
-            ?: QUALITIES.keys.toSet()
+        val body = response.body!!.string()
+        val resultStr = extractJsonField(body, "result") ?: return emptyList()
+        val serversDoc = Jsoup.parse(resultStr, baseUrl)
+
+        val enabledServers = preferences.getStringSet(
+            KEY_ENABLED_SERVERS, SERVERS.keys.toSet()
+        ) ?: SERVERS.keys.toSet()
+        val enabledQualities = preferences.getStringSet(
+            KEY_ENABLED_QUALITIES, QUALITIES.keys.toSet()
+        ) ?: QUALITIES.keys.toSet()
         val dubFirst = preferences.getBoolean(KEY_DUB_FIRST, true)
 
-        // AnimeKai renders server buttons in two blocks: subbed then dubbed.
-        // We collect them in (type, serverId, embedUrl) triples.
-        data class ServerRef(val type: String, val id: String, val url: String)
-        val subs = mutableListOf<ServerRef>()
-        val dubs = mutableListOf<ServerRef>()
+        // (type, serverLabel, linkId)
+        data class Srv(val type: String, val label: String, val linkId: String)
+        val subs = mutableListOf<Srv>()
+        val dubs = mutableListOf<Srv>()
 
-        document.select("div.servers-list div.server-block").forEach { block ->
-            val type = block.attr("data-type") // "sub" or "dub"
-            block.select("a.play-btn").forEach { btn ->
-                val id = btn.attr("data-server-id")
-                val href = btn.absUrl("data-embed")
-                    .ifEmpty { btn.absUrl("href") }
-                if (id.isNotBlank() && href.isNotBlank()) {
-                    val ref = ServerRef(type, id, href)
-                    if (type.equals("dub", ignoreCase = true)) dubs.add(ref)
-                    else subs.add(ref)
+        serversDoc.select("div.servers div.type").forEach { typeBlock ->
+            val type = typeBlock.attr("data-type").lowercase()
+            typeBlock.select("li[data-link-id]").forEach { li ->
+                val label = li.text().trim()
+                val linkId = li.attr("data-link-id")
+                if (label.isBlank() || linkId.isBlank()) return@forEach
+                val srv = Srv(type, label, linkId)
+                when (type) {
+                    "dub"           -> dubs.add(srv)
+                    "sub", "hsub"   -> subs.add(srv)
+                    else            -> subs.add(srv)
                 }
             }
         }
 
-        // Some mirrors mark sub/dub only by a label rather than a separate
-        // block. Fall back to looking for explicit text labels.
-        if (subs.isEmpty() && dubs.isEmpty()) {
-            document.select("div.servers-list a.play-btn").forEach { btn ->
-                val id = btn.attr("data-server-id").ifBlank { btn.attr("data-name") }
-                val href = btn.absUrl("data-embed").ifEmpty { btn.absUrl("href") }
-                val label = btn.text().lowercase()
-                val ref = ServerRef(
-                    type = if (label.contains("dub")) "dub" else "sub",
-                    id = id,
-                    url = href
-                )
-                if (ref.type == "dub") dubs.add(ref) else subs.add(ref)
+        fun Srv.matchesEnabled(): Boolean =
+            enabledServers.any { id ->
+                label.lowercase().contains(id.lowercase())
             }
+
+        fun resolve(srv: Srv, prefix: String): List<Video> {
+            if (!srv.matchesEnabled()) return emptyList()
+            val embedUrl = fetchEmbedUrl(srv.linkId) ?: return emptyList()
+            return extractor.videosFromEmbed(embedUrl, srv.label, srv.type)
+                .filter { qualityMatches(it, enabledQualities) }
+                .map { v ->
+                    v.copy(quality = "$prefix ${v.quality}".trim())
+                }
         }
 
-        // Resolve each server into Video objects.
-        val subVideos = subs
-            .filter { enabledServers.contains(it.id) }
-            .flatMap { ref ->
-                extractor.videosFromEmbed(ref.url, ref.id)
-                    .filter { v -> qualityMatches(v, enabledQualities) }
-                    .map { v -> v.copy(quality = "[SUB] ${v.quality}") }
-            }
+        val subVideos = subs.flatMap { resolve(it, "[SUB]") }
+        val dubVideos = dubs.flatMap { resolve(it, "[DUB]") }
 
-        val dubVideos = dubs
-            .filter { enabledServers.contains(it.id) }
-            .flatMap { ref ->
-                extractor.videosFromEmbed(ref.url, ref.id)
-                    .filter { v -> qualityMatches(v, enabledQualities) }
-                    .map { v -> v.copy(quality = "[DUB] ${v.quality}") }
-            }
-
-        // Ordering: dub first when the user has it enabled (default true),
-        // otherwise subs first. Subs + dubs are always merged into a single
-        // video list per the user's request.
         return if (dubFirst) dubVideos + subVideos else subVideos + dubVideos
     }
 
-    override fun videoUrlParse(document: Document) = throw UnsupportedOperationException()
+    override fun videoUrlParse(document: Document) =
+        throw UnsupportedOperationException("videoUrlParse is not used.")
+
+    /**
+     * Call `/ajax/server?get=<link-id>` and return the embed URL from the
+     * JSON response (`{status, result: {url, skip_data}}`). Returns null
+     * on any failure.
+     */
+    private fun fetchEmbedUrl(linkId: String): String? {
+        val url = "$baseUrl/ajax/server".toHttpUrl().newBuilder()
+            .addQueryParameter("get", linkId)
+            .build()
+        return runCatching {
+            val resp = client.newCall(GET(url.toString(), headers)).execute()
+            val b = resp.body!!.string()
+            // result is an object: {"url":"...","skip_data":{...}}
+            val resultObj = extractJsonField(b, "result") ?: return@runCatching null
+            extractUrlFromResultObject(resultObj)
+        }.getOrNull()
+    }
 
     private fun qualityMatches(video: Video, enabledQualities: Set<String>): Boolean {
         val tag = video.quality.lowercase()
         return enabledQualities.any { enabled ->
             tag.contains(enabled.lowercase()) || enabled.equals("default", ignoreCase = true)
         }
+    }
+
+    // -----------------------------------------------------------------
+    // JSON helpers
+    //
+    // The site's AJAX endpoints return JSON with an HTML string inside
+    // `result`. We avoid pulling in Gson for these tiny payloads and
+    // just extract the field with a regex. The HTML is JSON-escaped
+    // (newline => \n, quote => \", etc.), so we unescape before parsing
+    // with Jsoup.
+    // -----------------------------------------------------------------
+
+    /** Extract a top-level JSON field as a raw string (no quotes, no escapes). */
+    private fun extractJsonField(json: String, field: String): String? {
+        // Match "field": followed by either a quoted string or an object.
+        val pattern = Regex(
+            """"$field"\s*:\s*("(?:[^"\\]|\\.)*"|\{[^}]*\})""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        val m = pattern.find(json) ?: return null
+        var raw = m.groupValues[1]
+        if (raw.startsWith("\"")) {
+            // Strip outer quotes.
+            raw = raw.substring(1, raw.length - 1)
+            return raw.unescapeJsonString()
+        }
+        return raw
+    }
+
+    /** Unescape a JSON string literal body. */
+    private fun String.unescapeJsonString(): String = buildString(length) {
+        var i = 0
+        while (i < this@unescapeJsonString.length) {
+            val c = this@unescapeJsonString[i]
+            if (c == '\\' && i + 1 < this@unescapeJsonString.length) {
+                when (this@unescapeJsonString[i + 1]) {
+                    'n'  -> append('\n')
+                    't'  -> append('\t')
+                    'r'  -> append('\r')
+                    '"'  -> append('"')
+                    '\\' -> append('\\')
+                    '/'  -> append('/')
+                    'b'  -> append('\b')
+                    'f'  -> append('\u000C')
+                    'u'  -> {
+                        val hex = this@unescapeJsonString.substring(i + 2, i + 6)
+                        append(hex.toInt(16).toChar())
+                        i += 4
+                    }
+                    else -> append(this@unescapeJsonString[i + 1])
+                }
+                i += 2
+            } else {
+                append(c)
+                i += 1
+            }
+        }
+    }
+
+    /** Extract the "url" field from a `{"url":"...","skip_data":{...}}` object string. */
+    private fun extractUrlFromResultObject(obj: String): String? {
+        val m = Regex(""""url"\s*:\s*"(?:[^"\\]|\\.)*"""").find(obj) ?: return null
+        return m.value.substringAfter(":").trim().trim('"').unescapeJsonString()
     }
 
     // -----------------------------------------------------------------
@@ -341,7 +526,8 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
         MultiSelectListPreference(screen.context).apply {
             key = KEY_ENABLED_SERVERS
             title = "Video servers"
-            summary = "Choose which embed servers to extract videos from."
+            summary = "Choose which embed servers to extract videos from. " +
+                "Matched by name (e.g. enabling 'VidPlay' keeps VidPlay-1, VidPlay-2, etc.)."
             entries = SERVERS.values.toTypedArray()
             entryValues = SERVERS.keys.toTypedArray()
             setDefaultValue(SERVERS.keys.toSet())
@@ -372,10 +558,10 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-        private const val KEY_PREFERRED_MIRROR = "preferred_mirror"
-        private const val KEY_ENABLED_MIRRORS  = "enabled_mirrors"
-        private const val KEY_ENABLED_SERVERS  = "enabled_servers"
+        private const val KEY_PREFERRED_MIRROR  = "preferred_mirror"
+        private const val KEY_ENABLED_MIRRORS   = "enabled_mirrors"
+        private const val KEY_ENABLED_SERVERS   = "enabled_servers"
         private const val KEY_ENABLED_QUALITIES = "enabled_qualities"
-        private const val KEY_DUB_FIRST        = "dub_first"
+        private const val KEY_DUB_FIRST         = "dub_first"
     }
 }
