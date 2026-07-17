@@ -1,12 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    AnimeKai extension manifest. Declares the application label and
-    launcher icon (the icon is used by Aniyomi / AnymeX when listing
-    extensions in the install dialog).
+    AnimeKai extension manifest.
+
+    Aniyomi / AnymeX discover extensions via PackageManager by looking for
+    the "tachiyomi.animeextension" <uses-feature> marker. Without it, an
+    installed APK is invisible to the extension loader. Two <meta-data>
+    entries then tell Aniyomi which class to instantiate and whether the
+    source is NSFW:
+
+      tachiyomi.animeextension.class  -> the source class (relative to the
+                                         package, prefixed with a dot)
+      tachiyomi.animeextension.nsfw   -> "0" or "1"
+
+    The class name here MUST match ext.classname in gradle.properties
+    (with the leading package stripped). For this project that's
+    "eu.kanade.tachiyomi.animeextension.en.animekai.AnimeKai", so the
+    relative form is ".AnimeKai".
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Marker that lets Aniyomi / AnymeX find this APK as an extension. -->
+    <uses-feature android:name="tachiyomi.animeextension" />
+
     <application
         android:label="AnimeKai"
         android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher" />
+        android:roundIcon="@mipmap/ic_launcher">
+
+        <!-- Source class to instantiate. Relative to the APK package. -->
+        <meta-data
+            android:name="tachiyomi.animeextension.class"
+            android:value=".AnimeKai" />
+
+        <!-- NSFW flag: 0 = SFW, 1 = NSFW. -->
+        <meta-data
+            android:name="tachiyomi.animeextension.nsfw"
+            android:value="0" />
+    </application>
 </manifest>
