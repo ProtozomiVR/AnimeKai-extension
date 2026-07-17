@@ -82,6 +82,57 @@ jobs:
       - name: Generate Gradle wrapper
         run: gradle wrapper --gradle-version 8.5 --distribution-type bin
 
+      # ----------------------------------------------------------------
+      # Compute the next version code BEFORE building. We read the
+      # `code` field from index.min.json on the `repo` branch (if it
+      # exists) and add 1. If the build then fails, nothing gets pushed,
+      # so index.min.json on `repo` is unchanged — the next run reads the
+      # same old code and tries `old + 1` again. Failed runs therefore
+      # DON'T skip version numbers.
+      #
+      # The computed code is passed to Gradle as -PappVersionCode so the
+      # APK's versionCode matches the `code` field in index.min.json
+      # (Aniyomi requires this to recognise updates).
+      # ----------------------------------------------------------------
+      - name: Compute next version code
+        id: version
+        run: |
+          set -e
+          # Fetch the repo branch (might not exist on first run).
+          git fetch origin repo 2>/dev/null || echo "(repo branch does not exist yet — first run)"
+
+          OLD_CODE=0
+          if git show origin/repo:index.min.json > /tmp/old_index.json 2>/dev/null; then
+            OLD_CODE=$(python3 - <<'PY'
+          import json
+          try:
+              data = json.load(open('/tmp/old_index.json'))
+              if isinstance(data, list) and data:
+                  print(int(data[0].get('code', 0)))
+              else:
+                  print(0)
+          except Exception:
+              print(0)
+          PY
+          )
+            OLD_CODE=${OLD_CODE:-0}
+          fi
+
+          LIB_VERSION="14"
+          NEW_CODE=$((OLD_CODE + 1))
+          NEW_VERSION="${LIB_VERSION}.${NEW_CODE}"
+
+          echo "old_code=${OLD_CODE}"       >> "$GITHUB_OUTPUT"
+          echo "code=${NEW_CODE}"            >> "$GITHUB_OUTPUT"
+          echo "version=${NEW_VERSION}"      >> "$GITHUB_OUTPUT"
+          echo "lib_version=${LIB_VERSION}"  >> "$GITHUB_OUTPUT"
+
+          echo "----------------------------------------------------------"
+          echo " Previous code (from repo branch) : ${OLD_CODE}"
+          echo " New code      (this build)       : ${NEW_CODE}"
+          echo " New version   (libVersion.code)   : ${NEW_VERSION}"
+          echo "----------------------------------------------------------"
+
       - name: Build release APK
         run: |
           set -o pipefail
@@ -90,7 +141,13 @@ jobs:
           # through `cat` so the output is not truncated by the GitHub
           # Actions log viewer, and we explicitly dump the diagnostics
           # directory if the build fails.
-          ./gradlew :animekai:assembleRelease --stacktrace --no-daemon --info 2>&1 | tee build.log
+          #
+          # -PappVersionCode / -PappVersionName propagate the computed
+          # version into the APK's manifest so it matches index.min.json.
+          ./gradlew :animekai:assembleRelease \
+            -PappVersionCode=${{ steps.version.outputs.code }} \
+            -PappVersionName=${{ steps.version.outputs.version }} \
+            --stacktrace --no-daemon --info 2>&1 | tee build.log
         continue-on-error: true
 
       - name: Dump Kotlin compile diagnostics on failure
@@ -222,9 +279,13 @@ jobs:
         id: meta
         run: |
           set -e
-          LIB_VERSION="14"
-          CODE="${GITHUB_RUN_NUMBER}"
-          VERSION="${LIB_VERSION}.${CODE}"
+          # CODE and VERSION come from the early "Compute next version code"
+          # step, which read the previous code from the repo branch's
+          # index.min.json and added 1. This way the version only advances
+          # when a build actually succeeds and is pushed to repo.
+          LIB_VERSION="${{ steps.version.outputs.lib_version }}"
+          CODE="${{ steps.version.outputs.code }}"
+          VERSION="${{ steps.version.outputs.version }}"
 
           # APK filename follows the Aniyomi/AnymeX repo convention:
           #   aniyomi-<lang>.<source-name>-v<libVersion>.<code>.apk
@@ -294,7 +355,7 @@ jobs:
           APK_NAME: ${{ steps.meta.outputs.name }}
           VERSION: ${{ steps.meta.outputs.version }}
           SOURCE_ID: ${{ steps.meta.outputs.source_id }}
-          CODE: ${{ github.run_number }}
+          CODE: ${{ steps.version.outputs.code }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -359,7 +420,7 @@ jobs:
           cp "${{ steps.meta.outputs.icon_local }}" "./${{ steps.meta.outputs.icon_rel }}"
 
           git add "index.min.json" "${{ steps.meta.outputs.apk_rel }}" "${{ steps.meta.outputs.icon_rel }}"
-          git commit -m "Publish AnimeKai v${GITHUB_RUN_NUMBER}" --no-verify
+          git commit -m "Publish AnimeKai v${{ steps.version.outputs.version }}" --no-verify
           git push --force origin repo
 
           echo "============================================================"
