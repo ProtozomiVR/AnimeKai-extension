@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.animekai
 
-import android.app.Application
 import android.content.SharedPreferences
 import androidx.preference.CheckBoxPreference
 import androidx.preference.MultiSelectListPreference
@@ -19,8 +18,6 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 
 /**
  * Aniyomi / AnymeX extension for animekaitv.to and its mirrors.
@@ -50,9 +47,7 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
     override val lang = "en"
     override val supportsLatest = true
 
-    private val preferences: SharedPreferences by lazy {
-        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
-    }
+    private val preferences: SharedPreferences by lazy { getSourcePreferences() }
 
     /**
      * The list of mirrors that animekaitv.to is known to operate under.
@@ -132,7 +127,7 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
     override fun popularAnimeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
         element.select("a.film-poster-ahref").firstOrNull()?.let { a ->
-            anime.setUrlWithoutDomain(a.absUrl("href"))
+            anime.url = a.absUrl("href").substringAfter(baseUrl).ifEmpty { a.absUrl("href") }
             a.select("img").firstOrNull()?.let {
                 anime.thumbnail_url = it.absUrl("data-src").ifEmpty { it.absUrl("src") }
             }
@@ -211,7 +206,7 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
 
     override fun episodeFromElement(element: Element): SEpisode {
         val episode = SEpisode.create()
-        episode.setUrlWithoutDomain(element.absUrl("href"))
+        episode.url = element.absUrl("href").substringAfter(baseUrl).ifEmpty { element.absUrl("href") }
         val num = element.select("div.ssli-order").text().trim()
         episode.episode_number = num.toFloatOrNull() ?: 0F
         episode.name = "Episode $num"
