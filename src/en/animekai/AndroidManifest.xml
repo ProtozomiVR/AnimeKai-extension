@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    This manifest intentionally declares only the application label.
-    Extension APKs do not need a launcher icon — Aniyomi / AnymeX loads
-    them as plugins and supplies its own UI chrome.
+    AnimeKai extension manifest. Declares the application label and
+    launcher icon (the icon is used by Aniyomi / AnymeX when listing
+    extensions in the install dialog).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application android:label="AnimeKai" />
+    <application
+        android:label="AnimeKai"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher" />
 </manifest>

@@ -33,6 +33,9 @@ android {
             manifest.srcFile 'AndroidManifest.xml'
             java.srcDirs = ['src']
             kotlin.srcDirs = ['src']
+            // res/ holds the launcher icon (mipmap-mdpi ... mipmap-xxxhdpi)
+            // and any other Android resources the extension ships.
+            res.srcDirs = ['res']
         }
     }
 }
