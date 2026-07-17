@@ -68,7 +68,7 @@ data class AnimeKaiAnimeMeta(
 ) {
     fun toSAnime(): SAnime = SAnime.create().apply {
         this.title = this@AnimeKaiAnimeMeta.title
-        setUrlWithoutDomain(url)
+        this.url = this@AnimeKaiAnimeMeta.url
         thumbnail_url = thumbnailUrl
         description = this@AnimeKaiAnimeMeta.description
         genre = this@AnimeKaiAnimeMeta.genre
@@ -85,7 +85,7 @@ data class AnimeKaiEpisodeMeta(
     fun toSEpisode(): SEpisode = SEpisode.create().apply {
         episode_number = number
         this.name = this@AnimeKaiEpisodeMeta.name
-        setUrlWithoutDomain(url)
+        this.url = this@AnimeKaiEpisodeMeta.url
         date_upload = date
     }
 }
