@@ -9,8 +9,14 @@ android {
         applicationId 'eu.kanade.tachiyomi.animeextension.en.animekai'
         minSdk 21
         targetSdk 34
-        versionCode 1
-        versionName '1.0.0'
+        // versionCode and versionName are passed in from the CI workflow
+        // via Gradle properties (-PappVersionCode=N -PappVersionName=14.N).
+        // The workflow reads the previous code from the repo branch's
+        // index.min.json and increments it ONLY when a build succeeds and
+        // is pushed to the repo branch — so failed runs don't skip version
+        // numbers. Local dev builds fall back to code=1, version=14.1.
+        versionCode (project.findProperty('appVersionCode')?.toString()?.toIntOrNull() ?: 1)
+        versionName (project.findProperty('appVersionName')?.toString() ?: '14.1')
     }
 
     buildTypes {
