@@ -15,8 +15,13 @@ android {
         // index.min.json and increments it ONLY when a build succeeds and
         // is pushed to the repo branch — so failed runs don't skip version
         // numbers. Local dev builds fall back to code=1, version=14.1.
-        versionCode (project.findProperty('appVersionCode')?.toString()?.toIntOrNull() ?: 1)
-        versionName (project.findProperty('appVersionName')?.toString() ?: '14.1')
+        // NOTE: build.gradle is a GROOVY script — Kotlin extension
+        // functions like String.toIntOrNull() do NOT exist here. Use
+        // Groovy's toInteger() (with the elvis-operator fallback for the
+        // local-dev case where the property isn't passed). The CI workflow
+        // always passes -PappVersionCode=<int> -PappVersionName=14.N.
+        versionCode ((project.findProperty('appVersionCode')  ?: '1'   ).toString().toInteger())
+        versionName ((project.findProperty('appVersionName')  ?: '14.1').toString())
     }
 
     buildTypes {
