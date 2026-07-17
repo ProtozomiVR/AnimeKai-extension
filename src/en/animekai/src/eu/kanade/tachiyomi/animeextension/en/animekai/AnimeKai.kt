@@ -6,7 +6,6 @@ import androidx.preference.CheckBoxPreference
 import androidx.preference.MultiSelectListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
-import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
@@ -239,13 +238,13 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
         throw UnsupportedOperationException()
     }
 
-    override fun videoListParse(document: Document): List<Video> {
+    override fun videoListParse(response: Response): List<Video> {
+        val document = response.asJsoup()
         // Determine which servers the user wants to keep.
         val enabledServers = preferences.getStringSet(KEY_ENABLED_SERVERS, SERVERS.keys.toSet())
             ?: SERVERS.keys.toSet()
         val enabledQualities = preferences.getStringSet(KEY_ENABLED_QUALITIES, QUALITIES.keys.toSet())
             ?: QUALITIES.keys.toSet()
-        val mergeSubDub = preferences.getBoolean(KEY_MERGE_SUB_DUB, true)
         val dubFirst = preferences.getBoolean(KEY_DUB_FIRST, true)
 
         // AnimeKai renders server buttons in two blocks: subbed then dubbed.
@@ -301,16 +300,10 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
                     .map { v -> v.copy(quality = "[DUB] ${v.quality}") }
             }
 
-        // Ordering: if mergeSubDub is true we put dubs first (when dubFirst
-        // is enabled), then subs. If mergeSubDub is false we return only
-        // whichever the user has enabled — but the user explicitly wanted
-        // both in one video list, so the default keeps them merged.
-        return when {
-            !mergeSubDub && dubFirst -> dubVideos + subVideos
-            !mergeSubDub -> subVideos + dubVideos
-            dubFirst -> dubVideos + subVideos
-            else -> subVideos + dubVideos
-        }
+        // Ordering: dub first when the user has it enabled (default true),
+        // otherwise subs first. Subs + dubs are always merged into a single
+        // video list per the user's request.
+        return if (dubFirst) dubVideos + subVideos else subVideos + dubVideos
     }
 
     override fun videoUrlParse(document: Document) = throw UnsupportedOperationException()
@@ -369,20 +362,12 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
             setDefaultValue(QUALITIES.keys.toSet())
         }.also { screen.addPreference(it) }
 
-        // 5. Merge sub + dub into a single video list.
-        CheckBoxPreference(screen.context).apply {
-            key = KEY_MERGE_SUB_DUB
-            title = "Merge sub and dub servers"
-            summary = "When enabled, both subbed and dubbed servers are " +
-                "returned for a single episode (dub first by default)."
-            setDefaultValue(true)
-        }.also { screen.addPreference(it) }
-
-        // 6. Dub first.
+        // 5. Dub first.
         CheckBoxPreference(screen.context).apply {
             key = KEY_DUB_FIRST
             title = "Dubbed servers first"
-            summary = "Sort dubbed servers above subbed ones in the video list."
+            summary = "Sort dubbed servers above subbed ones in the video list. " +
+                "Subbed and dubbed servers are always both shown."
             setDefaultValue(true)
         }.also { screen.addPreference(it) }
     }
@@ -396,7 +381,6 @@ class AnimeKai : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
         private const val KEY_ENABLED_MIRRORS  = "enabled_mirrors"
         private const val KEY_ENABLED_SERVERS  = "enabled_servers"
         private const val KEY_ENABLED_QUALITIES = "enabled_qualities"
-        private const val KEY_MERGE_SUB_DUB    = "merge_sub_dub"
         private const val KEY_DUB_FIRST        = "dub_first"
     }
 }
