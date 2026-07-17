@@ -1,8 +1,6 @@
 # How to install
-1. Paste
+1. Paste this into the add repo box:
 ```html
 https://raw.githubusercontent.com/ProtozomiVR/AnimeKai-extension/refs/heads/repo/index.min.json
 ```
-into the add repo box.
-
 2. Install the extension.
