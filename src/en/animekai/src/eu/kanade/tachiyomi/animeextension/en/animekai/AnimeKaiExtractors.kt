@@ -139,7 +139,7 @@ class AnimeKaiExtractors(
             ?: return emptyList()
         val doodHost = embedUrl.toHttpUrl().host
         val md5Page = fetch("https://$doodHost$passMd5Path", baseHeaders.newBuilder()
-            .set("Referer", embedUrl).build()).body.string()
+            .set("Referer", embedUrl).build()).body!!.string()
         val token = passMd5Path.substringAfterLast('/')
         val randomString = (1..10).map {
             ('a'..'z').random()
@@ -229,7 +229,7 @@ class AnimeKaiExtractors(
             val api = "https://$host/sources43"
             runCatching {
                 val apiResp = fetch(api, baseHeaders.newBuilder().set("Referer", embedUrl).build())
-                val body = apiResp.body.string()
+                val body = apiResp.body!!.string()
                 Regex(""""file"\s*:\s*"(https?://[^"]+)"""").findAll(body).forEach { m ->
                     val u = m.groupValues[1]
                     if (u.endsWith(".m3u8") || u.endsWith(".mp4")) {
@@ -283,7 +283,7 @@ class AnimeKaiExtractors(
 
     private fun extractInternal(embedUrl: String, tag: String): List<Video> {
         val resp = fetch(embedUrl)
-        val body = resp.body.string()
+        val body = resp.body!!.string()
         val url = Regex(""""(https?://[^"]+\.mp4[^"]*)"""").find(body)?.groupValues?.get(1)
             ?: return emptyList()
         return listOf(Video(url, "$tag - Default", url,
