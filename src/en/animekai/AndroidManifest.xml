@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    This manifest intentionally declares only the application label.
+    Extension APKs do not need a launcher icon — Aniyomi / AnymeX loads
+    them as plugins and supplies its own UI chrome.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="AnimeKai" />
+</manifest>
