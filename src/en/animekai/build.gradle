@@ -1,0 +1,53 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'eu.kanade.tachiyomi.animeextension.en.animekai'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'eu.kanade.tachiyomi.animeextension.en.animekai'
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile 'AndroidManifest.xml'
+            java.srcDirs = ['src']
+            kotlin.srcDirs = ['src']
+        }
+    }
+}
+
+dependencies {
+    // Aniyomi / Tachiyomi extension API. The version is pinned to the
+    // libVersion declared in gradle.properties so the repo indexer can
+    // pick the correct extension-runtime compatibility.
+    compileOnly "eu.kanade.tachiyomi:extension-api:14"
+
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"
+    implementation "org.jsoup:jsoup:1.17.2"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    implementation "com.squareup.okhttp3:logging-interceptor:4.12.0"
+    implementation "com.google.code.gson:gson:2.10.1"
+    implementation "androidx.preference:preference-ktx:1.2.1"
+    implementation "androidx.core:core-ktx:1.12.0"
+}
