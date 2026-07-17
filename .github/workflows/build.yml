@@ -267,8 +267,29 @@ jobs:
             echo "::error::Manifest is missing <meta-data android:name=\"tachiyomi.animeextension.nsfw\">."
             fail=1
           fi
+
+          # Detect dependency conflicts. If `androidx.core` is `implementation`-
+          # ed (instead of `compileOnly`), AGP auto-injects:
+          #   - appComponentFactory="androidx.core.app.CoreComponentFactory"
+          #   - <permission> for DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+          # These conflict with Aniyomi/AnymeX's own androidx classes at
+          # runtime and silently break extension loading — the APK installs
+          # but the extension never shows up. The reference APKs in
+          # mojuru/anime-repo have NEITHER of these entries.
+          if echo "$DUMP" | grep -q 'CoreComponentFactory'; then
+            echo "::error::Manifest contains appComponentFactory=CoreComponentFactory."
+            echo "::error::This means androidx.core is 'implementation' instead of 'compileOnly'."
+            echo "::error::Aniyomi will silently fail to load this extension. Change the dep to compileOnly in build.gradle."
+            fail=1
+          fi
+          if echo "$DUMP" | grep -q 'DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'; then
+            echo "::error::Manifest declares DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION."
+            echo "::error::This is auto-injected by androidx.core 1.9+ when 'implementation'-ed."
+            echo "::error::Aniyomi will silently fail to load this extension. Change androidx deps to compileOnly."
+            fail=1
+          fi
           if [ "$fail" = "1" ]; then exit 1; fi
-          echo "All Aniyomi extension markers are present."
+          echo "All Aniyomi extension markers are present, and no conflicting androidx entries found."
 
       # ----------------------------------------------------------------
       # Compute all the metadata that BOTH the index.min.json and the
