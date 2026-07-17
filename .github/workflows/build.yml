@@ -190,17 +190,23 @@ jobs:
           echo "---------------------------------------"
 
           fail=0
-          if ! echo "$DUMP" | grep -q 'tachiyomi.animeextension$'; then
+          # aapt2 prints attribute values as: ="value" (Raw: "value")
+          # so we match the quoted form to be unambiguous. The bare
+          # "tachiyomi.animeextension" quoted match distinguishes the
+          # <uses-feature> marker from the .class and .nsfw meta-data
+          # entries (which would also match a non-anchored substring
+          # search for "tachiyomi.animeextension").
+          if ! echo "$DUMP" | grep -q '"tachiyomi.animeextension"'; then
             echo "::error::Manifest is missing <uses-feature android:name=\"tachiyomi.animeextension\">."
             echo "::error::Aniyomi will NOT detect this APK as an extension — it will install but never show up."
             fail=1
           fi
-          if ! echo "$DUMP" | grep -q 'tachiyomi.animeextension.class'; then
+          if ! echo "$DUMP" | grep -q '"tachiyomi.animeextension.class"'; then
             echo "::error::Manifest is missing <meta-data android:name=\"tachiyomi.animeextension.class\">."
             echo "::error::Aniyomi will not know which class to instantiate."
             fail=1
           fi
-          if ! echo "$DUMP" | grep -q 'tachiyomi.animeextension.nsfw'; then
+          if ! echo "$DUMP" | grep -q '"tachiyomi.animeextension.nsfw"'; then
             echo "::error::Manifest is missing <meta-data android:name=\"tachiyomi.animeextension.nsfw\">."
             fail=1
           fi
