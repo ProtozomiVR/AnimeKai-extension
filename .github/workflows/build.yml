@@ -130,6 +130,41 @@ jobs:
           echo "final=$APK_PATH" >> "$GITHUB_OUTPUT"
 
       # ----------------------------------------------------------------
+      # Verify the APK is signed. An unsigned APK will install-fail in
+      # Aniyomi / AnymeX with "Installation failed: Install Cancel".
+      # The signingConfigs.debug config in build.gradle should produce a
+      # signed app-release.apk; this step fails the build early if for
+      # any reason signing did not happen (e.g. AGP version mismatch).
+      # ----------------------------------------------------------------
+      - name: Verify APK is signed
+        run: |
+          set -e
+          APK="${{ steps.apk.outputs.final }}"
+          echo "Inspecting: $APK"
+          # An unsigned release APK is named "*-unsigned.apk" by AGP.
+          case "$APK" in
+            *-unsigned.apk)
+              echo "::error::APK is unsigned (filename ends in -unsigned.apk). Aniyomi/AnymeX will refuse to install it."
+              echo "::error::Add 'signingConfig signingConfigs.debug' to the release buildType in build.gradle."
+              exit 1
+              ;;
+          esac
+          # Cross-check with apksigner (installed in the Android SDK build-tools).
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$APKSIGNER" ]; then
+            echo "Using apksigner: $APKSIGNER"
+            if ! "$APKSIGNER" verify --print-certs "$APK" >/tmp/sig.log 2>&1; then
+              echo "::error::apksigner verification failed:"
+              cat /tmp/sig.log
+              exit 1
+            fi
+            echo "Signature OK:"
+            grep -E 'Verifies|Signer #1 cert|SHA-256' /tmp/sig.log | head -n 5
+          else
+            echo "::warning::apksigner not found in build-tools; skipping signature verification (filename check passed)."
+          fi
+
+      # ----------------------------------------------------------------
       # Compute all the metadata that BOTH the index.min.json and the
       # push step need. Centralising it here keeps the JSON generation
       # and the git commit in sync.
