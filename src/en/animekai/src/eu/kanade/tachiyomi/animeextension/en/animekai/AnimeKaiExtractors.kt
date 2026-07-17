@@ -14,13 +14,23 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * Extracts playable video URLs from the various embed servers that
- * AnimeKai (and its mirrors) serve. Each extractor returns standard
- * [Video] objects, which means Aniyomi's download manager can persist
- * them automatically — no extra plumbing needed.
+ * AnimeKai (and its mirrors) serve.
  *
- * The dispatcher [videosFromEmbed] inspects the embed URL/host and routes
- * it to the correct extractor. New servers can be added by appending a
- * case to the `when` block below.
+ * Verified flow for AnimeKai's primary embed hosts (vidtube.site,
+ * megaplay.buzz, and any other host that serves the same "megaplay-player"
+ * markup):
+ *
+ *   1. AnimeKai's `/ajax/server?get=<link-id>` returns
+ *      `{result: {url: "https://<host>/stream/<base64>/<sub|dub>"}}`.
+ *   2. The embed page contains `<div id="megaplay-player"
+ *      data-id="<numeric>">`.
+ *   3. Fetching `<host>/stream/getSourcesNew?id=<data-id>&type=<sub|dub>`
+ *      returns `{sources: {file: "<m3u8-url>"}, tracks: [...]}`.
+ *
+ * The m3u8 is the master playlist and can be passed straight to Aniyomi's
+ * player. The dispatcher [videosFromEmbed] routes to this extractor for
+ * any embed URL whose host serves the megaplay-player markup, and falls
+ * back to legacy / generic extractors for other embed types.
  */
 class AnimeKaiExtractors(
     private val client: OkHttpClient,
@@ -28,42 +38,46 @@ class AnimeKaiExtractors(
 ) {
 
     /**
-     * Main entry point. Given an embed URL and a server id, return the
-     * list of playable videos. Errors from individual extractors are
-     * swallowed so a single broken server does not break the whole list.
+     * Main entry point.
+     *
+     * @param embedUrl  The URL returned by AnimeKai's `/ajax/server?get=`.
+     * @param label     The server label from the server list (e.g. "VidPlay-1").
+     * @param type      "sub", "hsub", or "dub".
      */
-    fun videosFromEmbed(embedUrl: String, serverId: String): List<Video> {
-        val host = runCatching { embedUrl.toHttpUrl().host }.getOrNull() ?: return emptyList()
-        val tag = serverLabel(serverId)
+    fun videosFromEmbed(embedUrl: String, label: String, type: String): List<Video> {
+        val host = runCatching { embedUrl.toHttpUrl().host }.getOrNull()
+            ?: return emptyList()
         return runCatching {
             when {
-                host.contains("vidstreaming") || host.contains("goload") ||
-                    host.contains("gogo") -> extractVidstreaming(embedUrl, tag)
+                // AnimeKai's primary embeds (vidtube.site, megaplay.buzz,
+                // and any other host serving the megaplay-player markup).
+                host.contains("vidtube") ||
+                host.contains("megaplay") ||
+                host.contains("nekostream") -> extractMegaplay(embedUrl, label, type)
 
-                host.contains("streamtape") -> extractStreamtape(embedUrl, tag)
+                host.contains("vidstreaming") || host.contains("goload") ||
+                    host.contains("gogo") -> extractVidstreaming(embedUrl, label)
+
+                host.contains("streamtape") -> extractStreamtape(embedUrl, label)
 
                 host.contains("doodstream") || host.contains("dood.") ||
-                    host.contains("ds2play") -> extractDoodstream(embedUrl, tag)
+                    host.contains("ds2play") -> extractDoodstream(embedUrl, label)
 
-                host.contains("mixdrop") -> extractMixDrop(embedUrl, tag)
+                host.contains("mixdrop") -> extractMixDrop(embedUrl, label)
 
-                host.contains("mp4upload") -> extractMp4Upload(embedUrl, tag)
+                host.contains("mp4upload") -> extractMp4Upload(embedUrl, label)
 
                 host.contains("filemoon") || host.contains("moonplayer") ->
-                    extractFileMoon(embedUrl, tag)
+                    extractFileMoon(embedUrl, label)
 
                 host.contains("streamwish") || host.contains("streamsb") ||
-                    host.contains("sbplay") -> extractStreamWish(embedUrl, tag)
+                    host.contains("sbplay") -> extractStreamWish(embedUrl, label)
 
-                host.contains("kwik") -> extractKwik(embedUrl, tag)
+                host.contains("kwik") -> extractKwik(embedUrl, label)
 
-                host.contains("xstream") -> extractXStream(embedUrl, tag)
+                host.contains("xstream") -> extractXStream(embedUrl, label)
 
-                // AnimeKai internal HD servers usually return a direct mp4
-                // URL behind a JSON endpoint.
-                serverId.startsWith("hd-") -> extractInternal(embedUrl, tag)
-
-                else -> extractGeneric(embedUrl, tag)
+                else -> extractGeneric(embedUrl, label)
             }
         }.getOrElse { emptyList() }
     }
@@ -72,22 +86,6 @@ class AnimeKaiExtractors(
     // Helpers
     // -----------------------------------------------------------------
 
-    private fun serverLabel(id: String): String = when {
-        id.equals("vidstreaming", ignoreCase = true) -> "Vidstreaming"
-        id.equals("vidstream",    ignoreCase = true) -> "VidStream"
-        id.equals("gogo",         ignoreCase = true) -> "Gogo"
-        id.equals("streamtape",   ignoreCase = true) -> "Streamtape"
-        id.equals("doodstream",   ignoreCase = true) -> "Doodstream"
-        id.equals("mixdrop",      ignoreCase = true) -> "MixDrop"
-        id.equals("mp4upload",    ignoreCase = true) -> "MP4Upload"
-        id.equals("filemoon",     ignoreCase = true) -> "FileMoon"
-        id.equals("streamwish",   ignoreCase = true) -> "StreamWish"
-        id.equals("kwik",         ignoreCase = true) -> "Kwik"
-        id.equals("xstream",      ignoreCase = true) -> "XStream"
-        id.startsWith("hd-")                       -> "AnimeKai ${id.uppercase()}"
-        else                                        -> id
-    }
-
     private fun req(url: String, headers: Headers? = null): Request =
         GET(url, headers ?: baseHeaders)
 
@@ -95,12 +93,70 @@ class AnimeKaiExtractors(
         client.newCall(req(url, headers)).execute()
 
     // -----------------------------------------------------------------
+    // MegaPlay / VidTube (AnimeKai's primary embed)
+    // -----------------------------------------------------------------
+
+    /**
+     * Extract the m3u8 master URL from a MegaPlay / VidTube embed page.
+     *
+     * The embed page lives at `<host>/stream/<base64>/<sub|dub>` and
+     * contains `<div id="megaplay-player" data-id="<numeric>">`. We
+     * then call `<host>/stream/getSourcesNew?id=<data-id>&type=<type>`
+     * which returns `{sources: {file: "<m3u8-url>"}}`.
+     */
+    private fun extractMegaplay(embedUrl: String, label: String, type: String): List<Video> {
+        val doc = fetch(embedUrl, baseHeaders.newBuilder()
+            .set("Referer", "https://animekaitv.to/")
+            .build()).asJsoup()
+
+        val dataId = doc.select("#megaplay-player").firstOrNull()
+            ?.attr("data-id")
+            ?.takeIf { it.isNotBlank() }
+            ?: return emptyList()
+
+        // The type ("sub" or "dub") is the last path segment of the embed
+        // URL — fall back to the [type] argument the caller passed if the
+        // URL doesn't end with a recognisable type.
+        val embedType = embedUrl.toHttpUrl().pathSegments.lastOrNull()
+            ?.takeIf { it == "sub" || it == "dub" }
+            ?: type.takeIf { it == "sub" || it == "dub" }
+            ?: "sub"
+
+        val host = embedUrl.toHttpUrl().run { "$scheme://$host" }
+        val apiUrl = "$host/stream/getSourcesNew".toHttpUrl().newBuilder()
+            .addQueryParameter("id", dataId)
+            .addQueryParameter("type", embedType)
+            .build()
+
+        val apiResp = fetch(apiUrl.toString(), baseHeaders.newBuilder()
+            .set("Referer", embedUrl)
+            .set("X-Requested-With", "XMLHttpRequest")
+            .set("Accept", "application/json, text/javascript, */*; q=0.01")
+            .build())
+        val body = apiResp.body!!.string()
+
+        // Find the "file" field inside sources. The JSON looks like:
+        //   {"sources":{"file":"https://.../master.m3u8"},"tracks":[...],"t":1,...}
+        val m3u8 = Regex(""""file"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"""")
+            .find(body)?.groupValues?.get(1)
+            ?: return emptyList()
+
+        val videoHeaders = baseHeaders.newBuilder()
+            .set("Referer", embedUrl)
+            .set("Origin", host)
+            .build()
+        // The master playlist auto-negotiates quality, so we expose one
+        // Video labelled "Default". Aniyomi's player will offer all
+        // variants from the m3u8.
+        return listOf(Video(m3u8, "$label - Default", m3u8, headers = videoHeaders))
+    }
+
+    // -----------------------------------------------------------------
     // Vidstreaming / Gogo
     // -----------------------------------------------------------------
 
     private fun extractVidstreaming(embedUrl: String, tag: String): List<Video> {
         val doc = fetch(embedUrl).asJsoup()
-        // Gogo / Vidstreaming exposes a "sources" JSON in a <script> tag.
         val script = doc.select("script").html()
         val sourcePattern = Regex("""file\s*:\s*"(https?://[^"]+)"""")
         val qualityPattern = Regex("""label\s*:\s*"([^"]+)"""")
@@ -122,7 +178,6 @@ class AnimeKaiExtractors(
         val link = doc.select("div#oolink a[href*=getvideo], a#downloadbtn").firstOrNull()
             ?: return emptyList()
         val href = link.absUrl("href").ifEmpty { link.attr("href") }
-        // The actual streamable URL is one redirect away.
         val resp = fetch(href)
         val finalUrl = resp.request.url.toString()
         return listOf(Video(finalUrl, "$tag - Default", finalUrl,
@@ -158,8 +213,7 @@ class AnimeKaiExtractors(
     private fun extractMixDrop(embedUrl: String, tag: String): List<Video> {
         val doc = fetch(embedUrl).asJsoup()
         val html = doc.html()
-        val m = Regex("""eval\(""").find(html) ?: return emptyList()
-        // Look for the stream URL inside the obfuscated eval'd payload.
+        Regex("""eval\(""").find(html) ?: return emptyList()
         val url = Regex("""https://[^"']+\.mp4""").find(html)?.value ?: return emptyList()
         return listOf(Video(url, "$tag - Default", url,
             headers = baseHeaders.newBuilder().set("Referer", embedUrl).build()))
@@ -201,8 +255,6 @@ class AnimeKaiExtractors(
             }
         }
         if (videos.isEmpty()) {
-            // Some FileMoon pages hide the URL behind an AES-encrypted blob.
-            // Try the common pattern.
             Regex("""file:'([^']+\.mp4[^']*)'""").find(html)?.groupValues?.get(1)?.let { url ->
                 videos += Video(url, "$tag - Default", url,
                     headers = baseHeaders.newBuilder().set("Referer", embedUrl).build())
@@ -224,7 +276,6 @@ class AnimeKaiExtractors(
                 headers = baseHeaders.newBuilder().set("Referer", embedUrl).build())
         }.toMutableList()
         if (initial.isEmpty()) {
-            // API-style: /sourcesN where N is 41 or 43.
             val host = embedUrl.toHttpUrl().host
             val api = "https://$host/sources43"
             runCatching {
@@ -275,19 +326,6 @@ class AnimeKaiExtractors(
             Video(it, "$tag - Default", it,
                 headers = baseHeaders.newBuilder().set("Referer", embedUrl).build())
         }
-    }
-
-    // -----------------------------------------------------------------
-    // AnimeKai internal HD servers (direct mp4 behind ajax)
-    // -----------------------------------------------------------------
-
-    private fun extractInternal(embedUrl: String, tag: String): List<Video> {
-        val resp = fetch(embedUrl)
-        val body = resp.body!!.string()
-        val url = Regex(""""(https?://[^"]+\.mp4[^"]*)"""").find(body)?.groupValues?.get(1)
-            ?: return emptyList()
-        return listOf(Video(url, "$tag - Default", url,
-            headers = baseHeaders.newBuilder().set("Referer", embedUrl).build()))
     }
 
     // -----------------------------------------------------------------
