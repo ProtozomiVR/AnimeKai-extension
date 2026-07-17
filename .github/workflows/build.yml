@@ -1,0 +1,138 @@
+# AnimeKai extension build + repo-index workflow.
+#
+# Runs on every push to the default branch and on manual dispatch.
+# In a single job node ("build-and-publish") it:
+#   1. Builds the extension APK with Gradle.
+#   2. Generates the Aniyomi/AnymeX repo index.min.json file from the APK.
+#   3. Creates or resets the "repo" branch and uploads BOTH the APK and
+#      index.min.json in one commit, so the repo branch is always
+#      consistent with a single build.
+name: Build and publish AnimeKai extension
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'src/**'
+      - 'build.gradle'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build APK and publish to repo branch
+    runs-on: ubuntu-latest
+
+    steps:
+      # ----------------------------------------------------------------
+      # Single node: checkout, setup JDK, build APK, generate index,
+      # push both artifacts to the repo branch in one commit.
+      # ----------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build release APK
+        run: ./gradlew :animekai:assembleRelease
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          APK_PATH=$(find src/en/animekai/build/outputs/apk/release -name '*.apk' | head -n1)
+          if [ -z "$APK_PATH" ]; then
+            echo "APK not found"; exit 1
+          fi
+          echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
+          # Copy to a known name so the repo branch is stable.
+          mkdir -p artifacts
+          cp "$APK_PATH" artifacts/animekai-v${GITHUB_RUN_NUMBER}.apk
+          echo "final=artifacts/animekai-v${GITHUB_RUN_NUMBER}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Compute APK metadata
+        id: meta
+        run: |
+          APK_FILE="${{ steps.apk.outputs.final }}"
+          APK_SIZE=$(stat -c%s "$APK_FILE")
+          APK_SHA=$(sha256sum "$APK_FILE" | awk '{print $1}')
+          APK_NAME="animekai-v${GITHUB_RUN_NUMBER}.apk"
+          APK_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/repo/$APK_NAME"
+          echo "name=$APK_NAME"        >> "$GITHUB_OUTPUT"
+          echo "url=$APK_URL"          >> "$GITHUB_OUTPUT"
+          echo "size=$APK_SIZE"        >> "$GITHUB_OUTPUT"
+          echo "sha=$APK_SHA"          >> "$GITHUB_OUTPUT"
+          echo "version=$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate index.min.json
+        run: |
+          cat > artifacts/index.min.json <<EOF
+          {
+            "info": {
+              "name": "AnimeKai extension repository",
+              "website": "https://github.com/${GITHUB_REPOSITORY}",
+              "description": "AnimeKai (animekaitv.to) extension for Aniyomi / AnymeX."
+            },
+            "anime": [
+              {
+                "name": "AnimeKai",
+                "pkg": "eu.kanade.tachiyomi.animeextension.en.animekai",
+                "apk": "${{ steps.meta.outputs.name }}",
+                "lang": "en",
+                "code": ${{ github.run_number }},
+                "version": "${{ steps.meta.outputs.version }}",
+                "nsfw": 0,
+                "hasBeta": false,
+                "hasVideo": true,
+                "sources": [
+                  {
+                    "name": "AnimeKai",
+                    "lang": "en",
+                    "baseUrl": "https://animekaitv.to",
+                    "versionId": ${{ github.run_number }}
+                  }
+                ],
+                "fileSize": ${{ steps.meta.outputs.size }},
+                "checksum": "${{ steps.meta.outputs.sha }}",
+                "downloadUrl": "${{ steps.meta.outputs.url }}"
+              }
+            ]
+          }
+          EOF
+          # Strip leading whitespace (heredoc indentation above).
+          sed -i 's/^[[:space:]]*//' artifacts/index.min.json
+          python3 -c "import json,sys; json.load(open('artifacts/index.min.json'))"
+
+      - name: Push APK and index.min.json to repo branch (single commit)
+        run: |
+          set -e
+          REPO_URL="https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "$REPO_URL"
+          # Create or reset the repo branch from current HEAD.
+          git checkout -B repo
+          # Remove any previously published APKs (keep history clean and
+          # make the branch mirror only the latest artifacts).
+          git rm -rf --ignore-unmatch --quiet '*.apk' 'index.min.json' || true
+          cp artifacts/index.min.json ./index.min.json
+          cp "${{ steps.apk.outputs.final }}" "./${{ steps.meta.outputs.name }}"
+          git add "index.min.json" "${{ steps.meta.outputs.name }}"
+          git commit -m "Publish AnimeKai v${GITHUB_RUN_NUMBER}" --no-verify
+          git push --force origin repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
