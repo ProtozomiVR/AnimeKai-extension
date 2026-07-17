@@ -193,22 +193,45 @@ jobs:
           print(int.from_bytes(h, 'big', signed=False) & 0x7FFFFFFFFFFFFFFF)
           ")
 
+          PKG="eu.kanade.tachiyomi.animeextension.en.animekai"
+
           # Copy APK into artifacts/apk/ so the push step can publish it
           # under the apk/ subdirectory of the repo branch (matching the
           # reference repo layout).
+          mkdir -p artifacts/apk artifacts/icon
           cp "${{ steps.apk.outputs.final }}" "artifacts/apk/${APK_NAME}"
+
+          # AnymeX / Aniyomi fetch the extension list icon from a SEPARATE
+          # URL that is NOT inside the APK:
+          #     <repo-base>/icon/<full-package-name>.png
+          # (verified against github.com/mojuru/anime-repo). The APK's own
+          # @mipmap/ic_launcher only shows up in Android's app drawer, not
+          # in AnymeX's extension list. We publish the highest-density
+          # mipmap (xxxhdpi, 192x192) as the repo icon so AnymeX can
+          # downscale it for any device.
+          ICON_SRC="src/en/animekai/res/mipmap-xxxhdpi/ic_launcher.png"
+          if [ ! -f "$ICON_SRC" ]; then
+            echo "::error::Icon source missing: $ICON_SRC"
+            exit 1
+          fi
+          ICON_NAME="${PKG}.png"
+          cp "$ICON_SRC" "artifacts/icon/${ICON_NAME}"
 
           echo "name=${APK_NAME}"           >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}"         >> "$GITHUB_OUTPUT"
           echo "source_id=${SOURCE_ID}"     >> "$GITHUB_OUTPUT"
+          echo "pkg=${PKG}"                 >> "$GITHUB_OUTPUT"
           echo "apk_rel=apk/${APK_NAME}"    >> "$GITHUB_OUTPUT"
           echo "apk_local=artifacts/apk/${APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "icon_rel=icon/${ICON_NAME}" >> "$GITHUB_OUTPUT"
+          echo "icon_local=artifacts/icon/${ICON_NAME}" >> "$GITHUB_OUTPUT"
 
           echo "----------------------------------------------------------"
           echo " APK name     : ${APK_NAME}"
           echo " Version      : ${VERSION}"
           echo " Source ID    : ${SOURCE_ID}"
           echo " APK rel path : apk/${APK_NAME}"
+          echo " Icon rel path: icon/${ICON_NAME}"
           echo "----------------------------------------------------------"
 
       # ----------------------------------------------------------------
@@ -258,10 +281,13 @@ jobs:
       # Single commit to the repo branch:
       #   - index.min.json   at the branch root
       #   - apk/<name>.apk   in the apk/ subdirectory
+      #   - icon/<pkg>.png   in the icon/ subdirectory (shown by AnymeX
+      #                      in the extension list — this is SEPARATE from
+      #                      the APK's @mipmap/ic_launcher)
       # A force-push resets the branch to mirror only the latest build,
       # so old APKs are removed and the repo branch stays clean.
       # ----------------------------------------------------------------
-      - name: Push APK and index.min.json to repo branch (single commit)
+      - name: Push APK, icon, and index.min.json to repo branch (single commit)
         run: |
           set -e
           REPO_URL="https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -272,16 +298,18 @@ jobs:
           # Create or reset the repo branch from current HEAD.
           git checkout -B repo
 
-          # Remove any previously published APKs (in apk/) and the old
-          # index so the branch mirrors only the latest artifacts.
-          git rm -rf --ignore-unmatch --quiet 'apk/*.apk' 'index.min.json' || true
+          # Remove any previously published APKs (in apk/), icons (in icon/),
+          # and the old index so the branch mirrors only the latest artifacts.
+          git rm -rf --ignore-unmatch --quiet 'apk/*.apk' 'icon/*.png' 'index.min.json' || true
 
-          # Place index.min.json at the branch root and the APK inside apk/.
-          mkdir -p apk
-          cp artifacts/index.min.json           ./index.min.json
-          cp "${{ steps.meta.outputs.apk_local }}" "./${{ steps.meta.outputs.apk_rel }}"
+          # Place index.min.json at the branch root, the APK inside apk/,
+          # and the icon PNG inside icon/.
+          mkdir -p apk icon
+          cp artifacts/index.min.json            ./index.min.json
+          cp "${{ steps.meta.outputs.apk_local }}"  "./${{ steps.meta.outputs.apk_rel }}"
+          cp "${{ steps.meta.outputs.icon_local }}" "./${{ steps.meta.outputs.icon_rel }}"
 
-          git add "index.min.json" "${{ steps.meta.outputs.apk_rel }}"
+          git add "index.min.json" "${{ steps.meta.outputs.apk_rel }}" "${{ steps.meta.outputs.icon_rel }}"
           git commit -m "Publish AnimeKai v${GITHUB_RUN_NUMBER}" --no-verify
           git push --force origin repo
 
@@ -289,6 +317,7 @@ jobs:
           echo "Published to repo branch:"
           echo "  index.min.json  -> https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/repo/index.min.json"
           echo "  APK             -> https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/repo/${{ steps.meta.outputs.apk_rel }}"
+          echo "  Icon            -> https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/repo/${{ steps.meta.outputs.icon_rel }}"
           echo "============================================================"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
