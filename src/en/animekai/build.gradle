@@ -62,11 +62,23 @@ dependencies {
     // indexer can pick the correct extension-runtime compatibility.
     compileOnly "com.github.aniyomiorg:extensions-lib:14"
 
-    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"
-    implementation "org.jsoup:jsoup:1.17.2"
-    implementation "com.squareup.okhttp3:okhttp:4.12.0"
-    implementation "com.squareup.okhttp3:logging-interceptor:4.12.0"
-    implementation "com.google.code.gson:gson:2.10.1"
-    implementation "androidx.preference:preference-ktx:1.2.1"
-    implementation "androidx.core:core-ktx:1.12.0"
+    // IMPORTANT: every dependency below is marked `compileOnly` because
+    // Aniyomi / AnymeX already bundle these at runtime. If we use
+    // `implementation` here, the classes get packaged into the
+    // extension's classes.dex and conflict with Aniyomi's own copies
+    // when the DexClassLoader loads the extension — the source class
+    // then fails to instantiate silently and the extension never shows
+    // up in the app's source list.
+    //
+    // The reference APKs in github.com/mojuru/anime-repo confirm this:
+    // their manifests have NO androidx.core / CoreComponentFactory /
+    // DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION entries (which androidx
+    // auto-injects when you `implementation` it). Our APKs must match.
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"
+    compileOnly "org.jsoup:jsoup:1.17.2"
+    compileOnly "com.squareup.okhttp3:okhttp:4.12.0"
+    compileOnly "com.squareup.okhttp3:logging-interceptor:4.12.0"
+    compileOnly "com.google.code.gson:gson:2.10.1"
+    compileOnly "androidx.preference:preference-ktx:1.2.1"
+    compileOnly "androidx.core:core-ktx:1.12.0"
 }
