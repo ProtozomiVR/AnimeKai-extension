@@ -165,6 +165,49 @@ jobs:
           fi
 
       # ----------------------------------------------------------------
+      # Verify the APK declares the Aniyomi / AnymeX extension markers.
+      # Aniyomi discovers installed extensions by querying PackageManager
+      # for apps that declare <uses-feature android:name="tachiyomi.animeextension">.
+      # It then reads <meta-data android:name="tachiyomi.animeextension.class">
+      # to know which class to load. If either is missing, the APK installs
+      # but does NOT appear in Aniyomi's source list. We use aapt2 (part of
+      # the Android SDK build-tools) to dump the badged manifest and check.
+      # ----------------------------------------------------------------
+      - name: Verify APK declares Aniyomi extension markers
+        run: |
+          set -e
+          APK="${{ steps.apk.outputs.final }}"
+          AAPT2=$(find $ANDROID_HOME/build-tools -name aapt2 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -z "$AAPT2" ]; then
+            echo "::warning::aapt2 not found; cannot verify manifest markers. Skipping."
+            exit 0
+          fi
+          echo "Using aapt2: $AAPT2"
+          DUMP=$("$AAPT2" dump xmltree --file AndroidManifest.xml "$APK")
+
+          echo "---- AndroidManifest.xml (decoded) ----"
+          echo "$DUMP"
+          echo "---------------------------------------"
+
+          fail=0
+          if ! echo "$DUMP" | grep -q 'tachiyomi.animeextension$'; then
+            echo "::error::Manifest is missing <uses-feature android:name=\"tachiyomi.animeextension\">."
+            echo "::error::Aniyomi will NOT detect this APK as an extension — it will install but never show up."
+            fail=1
+          fi
+          if ! echo "$DUMP" | grep -q 'tachiyomi.animeextension.class'; then
+            echo "::error::Manifest is missing <meta-data android:name=\"tachiyomi.animeextension.class\">."
+            echo "::error::Aniyomi will not know which class to instantiate."
+            fail=1
+          fi
+          if ! echo "$DUMP" | grep -q 'tachiyomi.animeextension.nsfw'; then
+            echo "::error::Manifest is missing <meta-data android:name=\"tachiyomi.animeextension.nsfw\">."
+            fail=1
+          fi
+          if [ "$fail" = "1" ]; then exit 1; fi
+          echo "All Aniyomi extension markers are present."
+
+      # ----------------------------------------------------------------
       # Compute all the metadata that BOTH the index.min.json and the
       # push step need. Centralising it here keeps the JSON generation
       # and the git commit in sync.
