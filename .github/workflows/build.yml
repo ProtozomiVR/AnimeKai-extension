@@ -3,10 +3,11 @@
 # Runs on every push to the default branch and on manual dispatch.
 # In a single job node ("build-and-publish") it:
 #   1. Builds the extension APK with Gradle.
-#   2. Generates the Aniyomi/AnymeX repo index.min.json file from the APK.
-#   3. Creates or resets the "repo" branch and uploads BOTH the APK and
-#      index.min.json in one commit, so the repo branch is always
-#      consistent with a single build.
+#   2. Generates the Aniyomi/AnymeX repo index.min.json (flat JSON array
+#      format, matching https://github.com/mojuru/anime-repo).
+#   3. Creates or resets the "repo" branch and uploads BOTH the APK (inside
+#      an apk/ subdirectory) and index.min.json (at the branch root) in a
+#      single commit, so the repo branch is always consistent.
 name: Build and publish AnimeKai extension
 
 on:
@@ -82,7 +83,40 @@ jobs:
         run: gradle wrapper --gradle-version 8.5 --distribution-type bin
 
       - name: Build release APK
-        run: ./gradlew :animekai:assembleRelease --stacktrace --no-daemon
+        run: |
+          set -o pipefail
+          # Use --info so the actual Kotlin compile errors (with file:line
+          # and the offending source snippet) are printed in full. We pipe
+          # through `cat` so the output is not truncated by the GitHub
+          # Actions log viewer, and we explicitly dump the diagnostics
+          # directory if the build fails.
+          ./gradlew :animekai:assembleRelease --stacktrace --no-daemon --info 2>&1 | tee build.log
+        continue-on-error: true
+
+      - name: Dump Kotlin compile diagnostics on failure
+        if: ${{ always() }}
+        run: |
+          if grep -q "BUILD FAILED" build.log 2>/dev/null; then
+            echo "============================================================"
+            echo "Kotlin compilation errors (full extract):"
+            echo "============================================================"
+            # Print every line that looks like a Kotlin error.
+            grep -E '^e: |^w: |file://|AnimeKai|\.kt:[0-9]+:[0-9]+:|error:|Compilation error' build.log || true
+            echo "============================================================"
+            echo "Last 200 lines of build log:"
+            echo "============================================================"
+            tail -n 200 build.log || true
+            exit 1
+          fi
+          echo "Build succeeded."
+
+      - name: Fail job if build did not succeed
+        if: ${{ always() }}
+        run: |
+          if ! grep -q "BUILD SUCCESSFUL" build.log 2>/dev/null; then
+            echo "::error::Build did not complete successfully. See diagnostics above."
+            exit 1
+          fi
 
       - name: Locate built APK
         id: apk
@@ -92,64 +126,106 @@ jobs:
             echo "APK not found"; exit 1
           fi
           echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
-          # Copy to a known name so the repo branch is stable.
-          mkdir -p artifacts
-          cp "$APK_PATH" artifacts/animekai-v${GITHUB_RUN_NUMBER}.apk
-          echo "final=artifacts/animekai-v${GITHUB_RUN_NUMBER}.apk" >> "$GITHUB_OUTPUT"
+          mkdir -p artifacts/apk
+          echo "final=$APK_PATH" >> "$GITHUB_OUTPUT"
 
+      # ----------------------------------------------------------------
+      # Compute all the metadata that BOTH the index.min.json and the
+      # push step need. Centralising it here keeps the JSON generation
+      # and the git commit in sync.
+      # ----------------------------------------------------------------
       - name: Compute APK metadata
         id: meta
         run: |
-          APK_FILE="${{ steps.apk.outputs.final }}"
-          APK_SIZE=$(stat -c%s "$APK_FILE")
-          APK_SHA=$(sha256sum "$APK_FILE" | awk '{print $1}')
-          APK_NAME="animekai-v${GITHUB_RUN_NUMBER}.apk"
-          APK_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/repo/$APK_NAME"
-          echo "name=$APK_NAME"        >> "$GITHUB_OUTPUT"
-          echo "url=$APK_URL"          >> "$GITHUB_OUTPUT"
-          echo "size=$APK_SIZE"        >> "$GITHUB_OUTPUT"
-          echo "sha=$APK_SHA"          >> "$GITHUB_OUTPUT"
-          echo "version=$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+          set -e
+          LIB_VERSION="14"
+          CODE="${GITHUB_RUN_NUMBER}"
+          VERSION="${LIB_VERSION}.${CODE}"
 
+          # APK filename follows the Aniyomi/AnymeX repo convention:
+          #   aniyomi-<lang>.<source-name>-v<libVersion>.<code>.apk
+          # which matches the layout in github.com/mojuru/anime-repo.
+          APK_NAME="aniyomi-en.animekai-v${LIB_VERSION}.${CODE}.apk"
+
+          # Aniyomi source id = first 8 bytes of MD5("<name-lower>/<lang>/<versionId>")
+          # interpreted as a 64-bit big-endian int, sign bit cleared.
+          # We use versionId=1 (the default, since AnimeKai does not override it).
+          # Verified against github.com/mojuru/anime-repo: this algorithm
+          # reproduces the IDs for AnimeOnsen (8542735178285060053) etc.
+          SOURCE_ID=$(python3 -c "
+          import hashlib
+          h = hashlib.md5(b'animekai/en/1').digest()[:8]
+          print(int.from_bytes(h, 'big', signed=False) & 0x7FFFFFFFFFFFFFFF)
+          ")
+
+          # Copy APK into artifacts/apk/ so the push step can publish it
+          # under the apk/ subdirectory of the repo branch (matching the
+          # reference repo layout).
+          cp "${{ steps.apk.outputs.final }}" "artifacts/apk/${APK_NAME}"
+
+          echo "name=${APK_NAME}"           >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"         >> "$GITHUB_OUTPUT"
+          echo "source_id=${SOURCE_ID}"     >> "$GITHUB_OUTPUT"
+          echo "apk_rel=apk/${APK_NAME}"    >> "$GITHUB_OUTPUT"
+          echo "apk_local=artifacts/apk/${APK_NAME}" >> "$GITHUB_OUTPUT"
+
+          echo "----------------------------------------------------------"
+          echo " APK name     : ${APK_NAME}"
+          echo " Version      : ${VERSION}"
+          echo " Source ID    : ${SOURCE_ID}"
+          echo " APK rel path : apk/${APK_NAME}"
+          echo "----------------------------------------------------------"
+
+      # ----------------------------------------------------------------
+      # Generate index.min.json as a flat JSON array, matching the format
+      # used by Aniyomi/AnymeX extension repos (see mojuru/anime-repo).
+      # The APK is referenced by FILENAME ONLY; AnymeX prepends
+      # "<repo-base>/apk/" automatically when downloading.
+      # ----------------------------------------------------------------
       - name: Generate index.min.json
+        env:
+          APK_NAME: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_ID: ${{ steps.meta.outputs.source_id }}
+          CODE: ${{ github.run_number }}
         run: |
-          cat > artifacts/index.min.json <<EOF
-          {
-            "info": {
-              "name": "AnimeKai extension repository",
-              "website": "https://github.com/${GITHUB_REPOSITORY}",
-              "description": "AnimeKai (animekaitv.to) extension for Aniyomi / AnymeX."
-            },
-            "anime": [
-              {
-                "name": "AnimeKai",
-                "pkg": "eu.kanade.tachiyomi.animeextension.en.animekai",
-                "apk": "${{ steps.meta.outputs.name }}",
-                "lang": "en",
-                "code": ${{ github.run_number }},
-                "version": "${{ steps.meta.outputs.version }}",
-                "nsfw": 0,
-                "hasBeta": false,
-                "hasVideo": true,
-                "sources": [
+          python3 - <<'PY'
+          import json, os
+          entry = {
+              "name": "Aniyomi: AnimeKai",
+              "pkg":  "eu.kanade.tachiyomi.animeextension.en.animekai",
+              "apk":  os.environ["APK_NAME"],
+              "lang": "en",
+              "code": int(os.environ["CODE"]),
+              "version": os.environ["VERSION"],
+              "nsfw": 0,
+              "sources": [
                   {
-                    "name": "AnimeKai",
-                    "lang": "en",
-                    "baseUrl": "https://animekaitv.to",
-                    "versionId": ${{ github.run_number }}
+                      "name":     "AnimeKai",
+                      "lang":     "en",
+                      "id":       os.environ["SOURCE_ID"],
+                      "baseUrl":  "https://animekaitv.to"
                   }
-                ],
-                "fileSize": ${{ steps.meta.outputs.size }},
-                "checksum": "${{ steps.meta.outputs.sha }}",
-                "downloadUrl": "${{ steps.meta.outputs.url }}"
-              }
-            ]
+              ]
           }
-          EOF
-          # Strip leading whitespace (heredoc indentation above).
-          sed -i 's/^[[:space:]]*//' artifacts/index.min.json
-          python3 -c "import json,sys; json.load(open('artifacts/index.min.json'))"
+          with open("artifacts/index.min.json", "w") as f:
+              json.dump([entry], f, separators=(",", ":"))
+          # Sanity check: must parse as a JSON array.
+          with open("artifacts/index.min.json") as f:
+              parsed = json.load(f)
+          assert isinstance(parsed, list) and len(parsed) == 1, "index.min.json must be a 1-element array"
+          assert "sources" in parsed[0] and parsed[0]["sources"][0]["id"], "missing source id"
+          print("index.min.json OK:")
+          print(json.dumps(parsed, indent=2))
+          PY
 
+      # ----------------------------------------------------------------
+      # Single commit to the repo branch:
+      #   - index.min.json   at the branch root
+      #   - apk/<name>.apk   in the apk/ subdirectory
+      # A force-push resets the branch to mirror only the latest build,
+      # so old APKs are removed and the repo branch stays clean.
+      # ----------------------------------------------------------------
       - name: Push APK and index.min.json to repo branch (single commit)
         run: |
           set -e
@@ -157,15 +233,27 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "$REPO_URL"
+
           # Create or reset the repo branch from current HEAD.
           git checkout -B repo
-          # Remove any previously published APKs (keep history clean and
-          # make the branch mirror only the latest artifacts).
-          git rm -rf --ignore-unmatch --quiet '*.apk' 'index.min.json' || true
-          cp artifacts/index.min.json ./index.min.json
-          cp "${{ steps.apk.outputs.final }}" "./${{ steps.meta.outputs.name }}"
-          git add "index.min.json" "${{ steps.meta.outputs.name }}"
+
+          # Remove any previously published APKs (in apk/) and the old
+          # index so the branch mirrors only the latest artifacts.
+          git rm -rf --ignore-unmatch --quiet 'apk/*.apk' 'index.min.json' || true
+
+          # Place index.min.json at the branch root and the APK inside apk/.
+          mkdir -p apk
+          cp artifacts/index.min.json           ./index.min.json
+          cp "${{ steps.meta.outputs.apk_local }}" "./${{ steps.meta.outputs.apk_rel }}"
+
+          git add "index.min.json" "${{ steps.meta.outputs.apk_rel }}"
           git commit -m "Publish AnimeKai v${GITHUB_RUN_NUMBER}" --no-verify
           git push --force origin repo
+
+          echo "============================================================"
+          echo "Published to repo branch:"
+          echo "  index.min.json  -> https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/repo/index.min.json"
+          echo "  APK             -> https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/repo/${{ steps.meta.outputs.apk_rel }}"
+          echo "============================================================"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
