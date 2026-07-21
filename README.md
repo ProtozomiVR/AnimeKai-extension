@@ -1,3 +1,7 @@
+# For the time being, use the file in the releases untill i get the repo fixed.
+
+
+
 # How to install
 1. Paste this into the add repo box:
 ```html
