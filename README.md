@@ -1,4 +1,4 @@
-# For the time being, use the file in the releases untill i get the repo fixed.
+# For the time being, use the files in the releases untill i get the repo fixed.
 
 
 
